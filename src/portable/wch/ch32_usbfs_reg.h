@@ -162,8 +162,10 @@
 
 // RX_CTRL
 // In CH32X035, TX and RX share the same 8-bit control register (UEP0_CTRL_H):
-//   bits [1:0] = TX response, bit [4] = AUTO_TOG (shared), bit [6] = TX toggle
-//   bits [3:2] = RX response,                              bit [7] = RX toggle
+//   bits [1:0] = TX response, bit [6] = TX toggle
+//   bits [3:2] = RX response, bit [7] = RX toggle
+//   bit  [4]   = AUTO_TOG, shared: a single bit that enables automatic data toggle
+//                for both TX and RX simultaneously.
 #define USBFS_EP_R_RES_MASK (3 << 2)
 #define USBFS_EP_R_TOG      (1 << 7)
 #define USBFS_EP_R_AUTO_TOG (1 << 4)
