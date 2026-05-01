@@ -40,6 +40,11 @@
 #define EP_TX_LEN(ep)  ((&USBFSD->UEP0_TX_LEN)[2 * ep + (ep > 4 ? 24 : 0)])
 #define EP_TX_CTRL(ep) ((&USBFSD->UEP0_CTRL_H)[2 * ep + (ep > 4 ? 24 : 0)])
 #define EP_RX_CTRL(ep) ((&USBFSD->UEP0_CTRL_H)[2 * ep + (ep > 4 ? 24 : 0)])
+// CH32X035: TX and RX share one 8-bit control register. These helpers preserve
+// the opposite direction's bits (RES + TOG) during a read-modify-write.
+// AUTO_TOG (bit 4) is excluded from both masks so the caller's value takes effect.
+#define CH32X035_PRESERVE_TX_BITS(ep) (EP_TX_CTRL(ep) & (USBFS_EP_T_RES_MASK | USBFS_EP_T_TOG))
+#define CH32X035_PRESERVE_RX_BITS(ep) (EP_RX_CTRL(ep) & (USBFS_EP_R_RES_MASK | USBFS_EP_R_TOG))
 #else
 #define EP_DMA(ep)     ((&USBFSD->UEP0_DMA)[ep])
 #define EP_TX_LEN(ep)  ((&USBFSD->UEP0_TX_LEN)[2 * ep])
@@ -88,7 +93,13 @@ static void update_in(uint8_t rhport, uint8_t ep, bool force) {
 
       EP_TX_LEN(ep) = len;
       if (ep == 0) {
+#if defined(CH32X035)
+        // CH32X035: TX and RX share one register; preserve RX bits when updating TX
+        EP_TX_CTRL(0) = CH32X035_PRESERVE_RX_BITS(0) |
+                        USBFS_EP_T_RES_ACK | (data.ep0_tog ? USBFS_EP_T_TOG : 0);
+#else
         EP_TX_CTRL(0) = USBFS_EP_T_RES_ACK | (data.ep0_tog ? USBFS_EP_T_TOG : 0);
+#endif
         data.ep0_tog = !data.ep0_tog;
       } else if (data.isochronous[ep]) {
         EP_TX_CTRL(ep) = (EP_TX_CTRL(ep) & ~(USBFS_EP_T_RES_MASK)) | USBFS_EP_T_RES_NYET;
@@ -124,7 +135,12 @@ static void update_out(uint8_t rhport, uint8_t ep, size_t rx_len) {
     }
 
     if (ep == 0) {
+#if defined(CH32X035)
+      // CH32X035: TX and RX share one register; preserve TX bits when setting RX=ACK
+      EP_TX_CTRL(0) = CH32X035_PRESERVE_TX_BITS(0) | USBFS_EP_R_RES_ACK;
+#else
       EP_RX_CTRL(0) = USBFS_EP_R_RES_ACK;
+#endif
     }
   }
 }
@@ -143,8 +159,13 @@ bool dcd_init(uint8_t rhport, const tusb_rhport_init_t* rh_init) {
   // setup endpoint 0
   EP_DMA(0) = (uint32_t) &data.buffer[0][0];
   EP_TX_LEN(0) = 0;
+#if defined(CH32X035)
+  // CH32X035: TX and RX share one register; write combined initial state
+  EP_TX_CTRL(0) = USBFS_EP_T_RES_NAK | USBFS_EP_R_RES_ACK;
+#else
   EP_TX_CTRL(0) = USBFS_EP_T_RES_NAK;
   EP_RX_CTRL(0) = USBFS_EP_R_RES_ACK;
+#endif
 
   // enable other endpoints but NAK everything
   USBFSD->UEP4_1_MOD = 0xCC;
@@ -165,8 +186,14 @@ bool dcd_init(uint8_t rhport, const tusb_rhport_init_t* rh_init) {
     EP_DMA(ep) = (uint32_t) &data.buffer[ep][0];
 #endif
     EP_TX_LEN(ep) = 0;
+#if defined(CH32X035)
+    // CH32X035: TX and RX share one register; write combined initial state
+    EP_TX_CTRL(ep) = USBFS_EP_T_AUTO_TOG | USBFS_EP_T_RES_NAK |
+                     USBFS_EP_R_AUTO_TOG | USBFS_EP_R_RES_NAK;
+#else
     EP_TX_CTRL(ep) = USBFS_EP_T_AUTO_TOG | USBFS_EP_T_RES_NAK;
     EP_RX_CTRL(ep) = USBFS_EP_R_AUTO_TOG | USBFS_EP_R_RES_NAK;
+#endif
   }
   EP_DMA(3) = (uint32_t) &data.ep3_buffer.out[0];
 
@@ -195,8 +222,13 @@ void dcd_int_handler(uint8_t rhport) {
 
       case PID_SETUP:
         // setup clears stall
+#if defined(CH32X035)
+        // CH32X035: TX and RX share one register; write combined state
+        EP_TX_CTRL(0) = USBFS_EP_T_RES_NAK | USBFS_EP_R_RES_ACK;
+#else
         EP_TX_CTRL(0) = USBFS_EP_T_RES_NAK;
         EP_RX_CTRL(0) = USBFS_EP_R_RES_ACK;
+#endif
 
         data.ep0_tog = true;
         dcd_event_setup_received(rhport, &data.buffer[0][TUSB_DIR_OUT][0], true);
@@ -213,7 +245,12 @@ void dcd_int_handler(uint8_t rhport) {
     dcd_event_bus_reset(rhport, (USBFSD->UDEV_CTRL & USBFS_UDEV_CTRL_LOW_SPEED) ? TUSB_SPEED_LOW : TUSB_SPEED_FULL, true);
 
     USBFSD->DEV_ADDR = 0x00;
+#if defined(CH32X035)
+    // CH32X035: TX and RX share one register; preserve TX bits when setting RX=ACK
+    EP_TX_CTRL(0) = CH32X035_PRESERVE_TX_BITS(0) | USBFS_EP_R_RES_ACK;
+#else
     EP_RX_CTRL(0) = USBFS_EP_R_RES_ACK;
+#endif
 
     USBFSD->INT_FG = USBFS_INT_FG_BUS_RST;
   } else if (status & USBFS_INT_FG_SUSPEND) {
@@ -267,8 +304,13 @@ void dcd_edpt0_status_complete(uint8_t rhport, tusb_control_request_t const* req
       request->bRequest == TUSB_REQ_SET_ADDRESS) {
     USBFSD->DEV_ADDR = (uint8_t) request->wValue;
   }
+#if defined(CH32X035)
+  // CH32X035: TX and RX share one register; write combined state
+  EP_TX_CTRL(0) = USBFS_EP_T_RES_NAK | USBFS_EP_R_RES_ACK;
+#else
   EP_TX_CTRL(0) = USBFS_EP_T_RES_NAK;
   EP_RX_CTRL(0) = USBFS_EP_R_RES_ACK;
+#endif
 }
 
 bool dcd_edpt_open(uint8_t rhport, tusb_desc_endpoint_t const* desc_ep) {
@@ -283,13 +325,25 @@ bool dcd_edpt_open(uint8_t rhport, tusb_desc_endpoint_t const* desc_ep) {
   if (ep != 0) {
     if (dir == TUSB_DIR_OUT) {
       if (data.isochronous[ep]) {
+#if defined(CH32X035)
+        EP_TX_CTRL(ep) = CH32X035_PRESERVE_TX_BITS(ep) | USBFS_EP_R_AUTO_TOG | USBFS_EP_R_RES_NYET;
+#else
         EP_RX_CTRL(ep) = USBFS_EP_R_AUTO_TOG | USBFS_EP_R_RES_NYET;
+#endif
       } else {
+#if defined(CH32X035)
+        EP_TX_CTRL(ep) = CH32X035_PRESERVE_TX_BITS(ep) | USBFS_EP_R_AUTO_TOG | USBFS_EP_R_RES_ACK;
+#else
         EP_RX_CTRL(ep) = USBFS_EP_R_AUTO_TOG | USBFS_EP_R_RES_ACK;
+#endif
       }
     } else {
       EP_TX_LEN(ep) = 0;
+#if defined(CH32X035)
+      EP_TX_CTRL(ep) = CH32X035_PRESERVE_RX_BITS(ep) | USBFS_EP_T_AUTO_TOG | USBFS_EP_T_RES_NAK;
+#else
       EP_TX_CTRL(ep) = USBFS_EP_T_AUTO_TOG | USBFS_EP_T_RES_NAK;
+#endif
     }
   }
   return true;
@@ -339,10 +393,20 @@ void dcd_edpt_stall(uint8_t rhport, uint8_t ep_addr) {
   uint8_t dir = tu_edpt_dir(ep_addr);
   if (ep == 0) {
     if (dir == TUSB_DIR_OUT) {
+#if defined(CH32X035)
+      // CH32X035: TX and RX share one register; preserve TX bits when setting RX=STALL
+      EP_TX_CTRL(0) = CH32X035_PRESERVE_TX_BITS(0) | USBFS_EP_R_RES_STALL;
+#else
       EP_RX_CTRL(0) = USBFS_EP_R_RES_STALL;
+#endif
     } else {
       EP_TX_LEN(0) = 0;
+#if defined(CH32X035)
+      // CH32X035: TX and RX share one register; preserve RX bits when setting TX=STALL
+      EP_TX_CTRL(0) = CH32X035_PRESERVE_RX_BITS(0) | USBFS_EP_T_RES_STALL;
+#else
       EP_TX_CTRL(0) = USBFS_EP_T_RES_STALL;
+#endif
     }
   } else {
     if (dir == TUSB_DIR_OUT) {
@@ -359,7 +423,12 @@ void dcd_edpt_clear_stall(uint8_t rhport, uint8_t ep_addr) {
   uint8_t dir = tu_edpt_dir(ep_addr);
   if (ep == 0) {
     if (dir == TUSB_DIR_OUT) {
+#if defined(CH32X035)
+      // CH32X035: TX and RX share one register; preserve TX bits when setting RX=ACK
+      EP_TX_CTRL(0) = CH32X035_PRESERVE_TX_BITS(0) | USBFS_EP_R_RES_ACK;
+#else
       EP_RX_CTRL(0) = USBFS_EP_R_RES_ACK;
+#endif
     }
   } else {
     if (dir == TUSB_DIR_OUT) {
